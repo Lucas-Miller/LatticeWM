@@ -9,9 +9,12 @@ const UINT MOD_KEY = MOD_ALT;
 // Structure to hold window information
 struct WindowNode {
     HWND hwnd;
-    RECT rect;
+    RECT rect;         // Current position and size
+    RECT savedRect;    // Saved original position and size for fullscreen toggle
+    LONG savedStyle;   // Saved original style for fullscreen toggle
     WindowNode* left = nullptr;
     WindowNode* right = nullptr;
+    bool isFullscreen = false; // Track fullscreen state
 };
 
 std::vector<WindowNode> layout; // Stores the tiled window layout
@@ -122,6 +125,54 @@ void TileWindows(std::vector<WindowNode>& windows) {
     std::cout << "Windows tiled successfully.\n";
 }
 
+// Function to toggle fullscreen for a window
+void SetWindowFullscreen(WindowNode* node) {
+    if (!node) return;
+
+    if (!node->isFullscreen) {
+        // Save current window state
+        node->savedStyle = GetWindowLong(node->hwnd, GWL_STYLE);
+        if (!GetWindowRect(node->hwnd, &node->savedRect)) {
+            std::cerr << "Failed to get window rect. Error: " << GetLastError() << "\n";
+            return;
+        }
+
+        // Remove borders, title bar, etc.
+        SetWindowLong(node->hwnd, GWL_STYLE, node->savedStyle & ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZE | WS_MAXIMIZE | WS_SYSMENU));
+
+        // Get screen dimensions
+        HMONITOR hMonitor = MonitorFromWindow(node->hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO monitorInfo = { sizeof(monitorInfo) };
+        if (!GetMonitorInfo(hMonitor, &monitorInfo)) {
+            std::cerr << "Failed to get monitor info. Error: " << GetLastError() << "\n";
+            return;
+        }
+
+        // Resize and reposition to cover the entire screen
+        SetWindowPos(node->hwnd, HWND_TOP, 
+                     monitorInfo.rcMonitor.left, monitorInfo.rcMonitor.top, 
+                     monitorInfo.rcMonitor.right - monitorInfo.rcMonitor.left, 
+                     monitorInfo.rcMonitor.bottom - monitorInfo.rcMonitor.top, 
+                     SWP_NOZORDER | SWP_FRAMECHANGED);
+    } else {
+        // Restore original window style
+        SetWindowLong(node->hwnd, GWL_STYLE, node->savedStyle);
+
+        // Restore original window size and position
+        SetWindowPos(node->hwnd, HWND_TOP, 
+                     node->savedRect.left, node->savedRect.top, 
+                     node->savedRect.right - node->savedRect.left, 
+                     node->savedRect.bottom - node->savedRect.top, 
+                     SWP_NOZORDER | SWP_FRAMECHANGED);
+    }
+
+    // Toggle the fullscreen flag
+    node->isFullscreen = !node->isFullscreen;
+
+    // Force redraw
+    ShowWindow(node->hwnd, SW_SHOW);
+}
+
 // Function to focus a window
 void FocusWindow(WindowNode* current, bool left) {
     if (!current) return;
@@ -145,6 +196,7 @@ void FocusWindow(WindowNode* current, bool left) {
 bool RegisterHotKeys() {
     if (!RegisterHotKey(nullptr, 1, MOD_KEY, VK_LEFT)) return false;
     if (!RegisterHotKey(nullptr, 2, MOD_KEY, VK_RIGHT)) return false;
+    if (!RegisterHotKey(nullptr, 3, MOD_KEY, 'F')) return false;
     return true;
 }
 
@@ -185,6 +237,9 @@ int main() {
                         break;
                     case 2:
                         FocusWindow(currentNode, false); // MOD + RIGHT
+                        break;
+                    case 3:
+                        SetWindowFullscreen(currentNode); // MOD + F
                         break;
                 }
             }
