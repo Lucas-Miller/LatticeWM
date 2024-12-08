@@ -51,6 +51,52 @@ void LinkWindows(std::vector<WindowNode>& windows) {
     }
 }
 
+// Swap positions of two adjacent windows
+void SwapWindows(WindowNode* a, WindowNode* b) {
+    if (!a || !b) return;
+
+    std::cout << "Swapping windows: " << a->hwnd << " and " << b->hwnd << "\n";
+
+    // Retrieve and validate the current window positions
+    if (!GetWindowRect(a->hwnd, &a->rect) || !GetWindowRect(b->hwnd, &b->rect)) {
+        std::cerr << "Failed to get window rect. Error: " << GetLastError() << "\n";
+        return;
+    }
+
+    // Swap their positions on the screen
+    RECT tempRect = a->rect;
+    a->rect = b->rect;
+    b->rect = tempRect;
+
+    // Apply new positions to the windows
+    if (!SetWindowPos(a->hwnd, HWND_TOP, a->rect.left, a->rect.top,
+                      a->rect.right - a->rect.left, a->rect.bottom - a->rect.top,
+                      SWP_NOZORDER | SWP_SHOWWINDOW)) {
+        std::cerr << "Failed to set position for window a. Error: " << GetLastError() << "\n";
+    }
+
+    if (!SetWindowPos(b->hwnd, HWND_TOP, b->rect.left, b->rect.top,
+                      b->rect.right - b->rect.left, b->rect.bottom - b->rect.top,
+                      SWP_NOZORDER | SWP_SHOWWINDOW)) {
+        std::cerr << "Failed to set position for window b. Error: " << GetLastError() << "\n";
+    }
+
+    // Update their links in the layout
+    WindowNode* tempLeft = a->left;
+    WindowNode* tempRight = b->right;
+
+    if (a->left) a->left->right = b;
+    if (b->right) b->right->left = a;
+
+    b->left = tempLeft;
+    a->right = tempRight;
+
+    a->left = b;
+    b->right = a;
+
+    std::cout << "Swap completed successfully.\n";
+}
+
 // Function to calculate and apply dimensions to windows
 void TileWindows(std::vector<WindowNode>& windows) {
     int numWindows = static_cast<int>(windows.size());
@@ -197,6 +243,8 @@ bool RegisterHotKeys() {
     if (!RegisterHotKey(nullptr, 1, MOD_KEY, VK_LEFT)) return false;
     if (!RegisterHotKey(nullptr, 2, MOD_KEY, VK_RIGHT)) return false;
     if (!RegisterHotKey(nullptr, 3, MOD_KEY, 'F')) return false;
+    if (!RegisterHotKey(nullptr, 4, MOD_KEY | MOD_SHIFT, VK_LEFT)) return false; // Swap left
+    if (!RegisterHotKey(nullptr, 5, MOD_KEY | MOD_SHIFT, VK_RIGHT)) return false; // Swap right
     return true;
 }
 
@@ -240,6 +288,12 @@ int main() {
                         break;
                     case 3:
                         SetWindowFullscreen(currentNode); // MOD + F
+                        break;
+                    case 4:
+                        if (currentNode->left) SwapWindows(currentNode->left, currentNode); // MOD + SHIFT + LEFT
+                        break;
+                    case 5:
+                        if (currentNode->right) SwapWindows(currentNode, currentNode->right); // MOD + SHIFT + RIGHT
                         break;
                 }
             }
