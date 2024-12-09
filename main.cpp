@@ -17,6 +17,27 @@ struct WindowNode {
     bool isFullscreen = false; // Track fullscreen state
 };
 
+void MoveWindowNormalized(HWND hwnd, int x, int y, int width, int height) {
+    if (!hwnd) return;
+
+    // Retrieve original style
+    LONG originalStyle = GetWindowLong(hwnd, GWL_STYLE);
+
+    // Temporarily set to a normalized style
+    SetWindowLong(hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER);
+
+    // Move the window
+    if (!SetWindowPos(hwnd, HWND_TOP, x, y, width, height, SWP_NOZORDER | SWP_SHOWWINDOW)) {
+        std::cerr << "Failed to move window. Error: " << GetLastError() << "\n";
+    }
+
+    // Restore original style
+    SetWindowLong(hwnd, GWL_STYLE, originalStyle);
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER);
+}
+
+
 std::vector<WindowNode> layout; // Stores the tiled window layout
 
 // Callback to collect visible windows that will be managed
@@ -58,28 +79,17 @@ void SwapWindows(WindowNode* a, WindowNode* b) {
     std::cout << "Swapping windows: " << a->hwnd << " and " << b->hwnd << "\n";
 
     // Retrieve and validate the current window positions
-    if (!GetWindowRect(a->hwnd, &a->rect) || !GetWindowRect(b->hwnd, &b->rect)) {
-        std::cerr << "Failed to get window rect. Error: " << GetLastError() << "\n";
+    RECT rectA, rectB;
+    if (!GetWindowRect(a->hwnd, &rectA) || !GetWindowRect(b->hwnd, &rectB)) {
+        std::cerr << "Failed to get window rects. Error: " << GetLastError() << "\n";
         return;
     }
 
-    // Swap their positions on the screen
-    RECT tempRect = a->rect;
-    a->rect = b->rect;
-    b->rect = tempRect;
-
-    // Apply new positions to the windows
-    if (!SetWindowPos(a->hwnd, HWND_TOP, a->rect.left, a->rect.top,
-                      a->rect.right - a->rect.left, a->rect.bottom - a->rect.top,
-                      SWP_NOZORDER | SWP_SHOWWINDOW)) {
-        std::cerr << "Failed to set position for window a. Error: " << GetLastError() << "\n";
-    }
-
-    if (!SetWindowPos(b->hwnd, HWND_TOP, b->rect.left, b->rect.top,
-                      b->rect.right - b->rect.left, b->rect.bottom - b->rect.top,
-                      SWP_NOZORDER | SWP_SHOWWINDOW)) {
-        std::cerr << "Failed to set position for window b. Error: " << GetLastError() << "\n";
-    }
+    // Swap positions using the normalized move function
+    MoveWindowNormalized(a->hwnd, rectB.left, rectB.top,
+                         rectB.right - rectB.left, rectB.bottom - rectB.top);
+    MoveWindowNormalized(b->hwnd, rectA.left, rectA.top,
+                         rectA.right - rectA.left, rectA.bottom - rectA.top);
 
     // Update their links in the layout
     WindowNode* tempLeft = a->left;
@@ -97,6 +107,7 @@ void SwapWindows(WindowNode* a, WindowNode* b) {
     std::cout << "Swap completed successfully.\n";
 }
 
+
 // Function to calculate and apply dimensions to windows
 void TileWindows(std::vector<WindowNode>& windows) {
     int numWindows = static_cast<int>(windows.size());
@@ -105,71 +116,53 @@ void TileWindows(std::vector<WindowNode>& windows) {
         return;
     }
 
-    // Get accurate screen width and height
     HDC hdcScreen = GetDC(nullptr);
     int screenWidth = GetDeviceCaps(hdcScreen, HORZRES);
     int screenHeight = GetDeviceCaps(hdcScreen, VERTRES);
     ReleaseDC(nullptr, hdcScreen);
 
-    std::cout << "Screen dimensions: Width=" << screenWidth << ", Height=" << screenHeight << "\n";
-    std::cout << "Number of windows: " << numWindows << "\n";
+    int baseWidth = screenWidth / numWindows;  // Base width for each window
+    int remainder = screenWidth % numWindows; // Remaining pixels to distribute
+    int xOffset = 0;
 
-    float cumulativeOffset = 0.0f;
+    std::cout << "Screen dimensions: Width=" << screenWidth
+              << ", Height=" << screenHeight << "\n";
+    std::cout << "Base width: " << baseWidth << ", Remainder: " << remainder << "\n";
 
     for (int i = 0; i < numWindows; ++i) {
-        // Proportional width calculation
-        float startOffset = cumulativeOffset;
-        cumulativeOffset += static_cast<float>(screenWidth) / numWindows;
+        // Calculate width for this window
+        int width = baseWidth + (i < remainder ? 1 : 0);
+        int height = screenHeight;
 
-        int desiredWidth = static_cast<int>(std::round(cumulativeOffset)) - static_cast<int>(std::round(startOffset));
-        int desiredHeight = screenHeight;
+        std::cout << "Window " << i + 1 << " Target Position: xOffset=" << xOffset
+                  << ", Width=" << width << ", Height=" << height << "\n";
 
         HWND hwnd = windows[i].hwnd;
 
-        // Adjust for non-client area (borders, title bar, etc.)
-        RECT adjustedRect = { 0, 0, desiredWidth, desiredHeight };
-        if (!AdjustWindowRect(&adjustedRect, GetWindowLong(hwnd, GWL_STYLE), FALSE)) {
-            std::cerr << "Failed to adjust window rect for window " << i + 1 << ". Error: " << GetLastError() << "\n";
-            continue;
-        }
+        // Use MoveWindowNormalized for consistent handling
+        MoveWindowNormalized(hwnd, xOffset, 0, width, height);
 
-        int actualWidth = adjustedRect.right - adjustedRect.left;
-        int actualHeight = adjustedRect.bottom - adjustedRect.top;
-
-        // Correct offset to avoid gaps or overlaps
-        int xOffset = static_cast<int>(std::round(startOffset));
-
-        std::cout << "Tiling Window " << i + 1 << ": xOffset=" << xOffset
-                  << ", Desired Width=" << desiredWidth << ", Desired Height=" << desiredHeight
-                  << ", Adjusted Width=" << actualWidth << ", Adjusted Height=" << actualHeight << "\n";
-
-        // Restore window to normal state
-        ShowWindow(hwnd, SW_SHOWNORMAL);
-
-        // Set position and adjusted size
-        if (!SetWindowPos(hwnd, HWND_TOP, xOffset, 0, actualWidth, actualHeight, SWP_NOZORDER | SWP_SHOWWINDOW)) {
-            std::cerr << "Failed to set position for window " << i + 1 << ". Error: " << GetLastError() << "\n";
-        }
-
-        // Log actual dimensions after positioning
+        // Log the actual dimensions after adjustment
         RECT rect;
         if (GetWindowRect(hwnd, &rect)) {
             std::cout << "Window " << i + 1 << " Actual RECT: Left=" << rect.left
-                      << ", Top=" << rect.top
                       << ", Right=" << rect.right
-                      << ", Bottom=" << rect.bottom
-                      << ", Width=" << (rect.right - rect.left)
-                      << ", Height=" << (rect.bottom - rect.top) << "\n";
+                      << ", Width=" << (rect.right - rect.left) << "\n";
         } else {
             std::cerr << "Failed to get RECT for window " << i + 1 << ". Error: " << GetLastError() << "\n";
         }
 
-        
-        cumulativeOffset = static_cast<float>(rect.right);
+        // Update the offset for the next window
+        xOffset += width;
     }
+
+    std::cout << "Final Cumulative Offset: " << xOffset
+              << ", Expected Screen Width: " << screenWidth << "\n";
 
     std::cout << "Windows tiled successfully.\n";
 }
+
+
 
 // Function to toggle fullscreen for a window
 void SetWindowFullscreen(WindowNode* node) {
@@ -195,21 +188,22 @@ void SetWindowFullscreen(WindowNode* node) {
         }
 
         // Resize and reposition to cover the entire screen
-        SetWindowPos(node->hwnd, HWND_TOP, 
-                     monitorInfo.rcMonitor.left, monitorInfo.rcMonitor.top, 
-                     monitorInfo.rcMonitor.right - monitorInfo.rcMonitor.left, 
-                     monitorInfo.rcMonitor.bottom - monitorInfo.rcMonitor.top, 
-                     SWP_NOZORDER | SWP_FRAMECHANGED);
+        MoveWindowNormalized(node->hwnd,
+                             monitorInfo.rcMonitor.left,
+                             monitorInfo.rcMonitor.top,
+                             monitorInfo.rcMonitor.right - monitorInfo.rcMonitor.left,
+                             monitorInfo.rcMonitor.bottom - monitorInfo.rcMonitor.top);
     } else {
         // Restore original window style
         SetWindowLong(node->hwnd, GWL_STYLE, node->savedStyle);
+        SetWindowPos(node->hwnd, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER);
 
         // Restore original window size and position
-        SetWindowPos(node->hwnd, HWND_TOP, 
-                     node->savedRect.left, node->savedRect.top, 
-                     node->savedRect.right - node->savedRect.left, 
-                     node->savedRect.bottom - node->savedRect.top, 
-                     SWP_NOZORDER | SWP_FRAMECHANGED);
+        MoveWindowNormalized(node->hwnd,
+                             node->savedRect.left,
+                             node->savedRect.top,
+                             node->savedRect.right - node->savedRect.left,
+                             node->savedRect.bottom - node->savedRect.top);
     }
 
     // Toggle the fullscreen flag
@@ -218,6 +212,7 @@ void SetWindowFullscreen(WindowNode* node) {
     // Force redraw
     ShowWindow(node->hwnd, SW_SHOW);
 }
+
 
 // Function to focus a window
 void FocusWindow(WindowNode* current, bool left) {
