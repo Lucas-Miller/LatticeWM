@@ -9,7 +9,6 @@
 #include <string>
 #include <thread>
 #include <chrono>
-
 #include <shellscalingapi.h>
 #pragma comment(lib, "Shcore.lib")
 
@@ -92,9 +91,11 @@ std::mutex layoutMutex;
 
 // Hotkey and resize mode variables
 bool isResizeMode = false;
-HWND activeWindowForResize = nullptr;
 LayoutNode* activeNodeForResize = nullptr;
 HHOOK hKeyboardHook = NULL;
+
+// Queue to manage pending splits awaiting window assignments
+std::queue<LayoutNode*> pendingSplits;
 
 // Function Prototypes
 bool MoveWindowNormalized(HWND hwnd, int x, int y, int width, int height);
@@ -113,9 +114,21 @@ void UnregisterHotKeys();
 LayoutNode* FindAdjacent(LayoutNode* current, Direction dir);
 void Navigate(Direction dir);
 bool MoveWindowInDirection(Direction dir);
+bool AddNewSplit(LayoutNode* currentNode, Direction dir);
+SplitType GetSplitTypeFromDirection(Direction dir);
 void AdjustSplitRatio(LayoutNode* node, float deltaRatio);
 LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam);
 void PrintLayout(LayoutNode* node, int depth = 0);
+void ChangeSplitOrientation(SplitType newSplitType);
+void CALLBACK WinEventProc(
+    HWINEVENTHOOK hWinEventHook,
+    DWORD event,
+    HWND hwnd,
+    LONG idObject,
+    LONG idChild,
+    DWORD dwEventThread,
+    DWORD dwmsEventTime
+);
 
 // Helper function to retrieve window title
 std::string GetWindowTitle(HWND hwnd) {
@@ -140,7 +153,7 @@ std::string GetWindowTitle(HWND hwnd) {
     return ""; // No title found
 }
 
-// Function to normalize and move windows
+// Function to normalize and move windows for more consistent tiling behavior
 bool MoveWindowNormalized(HWND hwnd, int x, int y, int width, int height) {
     if (!hwnd) return false;
 
@@ -153,19 +166,20 @@ bool MoveWindowNormalized(HWND hwnd, int x, int y, int width, int height) {
     // Retrieve original style
     LONG originalStyle = GetWindowLong(hwnd, GWL_STYLE);
     if (originalStyle == 0 && GetLastError() != 0) {
-        std::cerr << "MoveWindowNormalized: Failed to get window style for HWND 0x" 
+        std::cerr << "MoveWindowNormalized: Failed to get window style for HWND=0x" 
                   << std::hex << hwnd << std::dec << ". Error: " << GetLastError() << "\n";
         return false;
     }
 
     // Temporarily set to a normalized style
     if (!SetWindowLong(hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE)) {
-        std::cerr << "MoveWindowNormalized: Failed to set window style for HWND 0x" 
+        std::cerr << "MoveWindowNormalized: Failed to set window style for HWND=0x" 
                   << std::hex << hwnd << std::dec << ". Error: " << GetLastError() << "\n";
         return false;
     }
+
     if (!SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER)) {
-        std::cerr << "MoveWindowNormalized: Failed to update window style for HWND 0x" 
+        std::cerr << "MoveWindowNormalized: Failed to update window style for HWND=0x" 
                   << std::hex << hwnd << std::dec << ". Error: " << GetLastError() << "\n";
         return false;
     }
@@ -173,18 +187,18 @@ bool MoveWindowNormalized(HWND hwnd, int x, int y, int width, int height) {
     // Move the window
     BOOL success = SetWindowPos(hwnd, HWND_TOP, x, y, width, height, SWP_NOZORDER | SWP_SHOWWINDOW);
     if (!success) {
-        std::cerr << "MoveWindowNormalized: Failed to move HWND 0x" 
+        std::cerr << "MoveWindowNormalized: Failed to move HWND=0x" 
                   << std::hex << hwnd << std::dec << ". Error: " << GetLastError() << "\n";
     }
 
     // Restore original style
     if (!SetWindowLong(hwnd, GWL_STYLE, originalStyle)) {
-        std::cerr << "MoveWindowNormalized: Failed to restore window style for HWND 0x" 
+        std::cerr << "MoveWindowNormalized: Failed to restore window style for HWND=0x" 
                   << std::hex << hwnd << std::dec << ". Error: " << GetLastError() << "\n";
         return false;
     }
     if (!SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER)) {
-        std::cerr << "MoveWindowNormalized: Failed to restore window style for HWND 0x" 
+        std::cerr << "MoveWindowNormalized: Failed to restore window style for HWND=0x" 
                   << std::hex << hwnd << std::dec << ". Error: " << GetLastError() << "\n";
         return false;
     }
@@ -196,11 +210,11 @@ bool MoveWindowNormalized(HWND hwnd, int x, int y, int width, int height) {
 BOOL CALLBACK EnumWindowsCallback(HWND hwnd, LPARAM lParam) {
     auto windows = reinterpret_cast<std::vector<WindowInfo>*>(lParam);
 
-    if (!IsWindowVisible(hwnd)) return TRUE; // Skip invisible windows
-    if (GetWindowTextLengthA(hwnd) == 0) return TRUE; // Skip untitled windows
+    if (!IsWindowVisible(hwnd)) return TRUE;                   // Skip invisible windows
+    if (GetWindowTextLengthA(hwnd) == 0) return TRUE;          // Skip untitled windows
     LONG exStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
 
-    if (exStyle & WS_EX_TOOLWINDOW) return TRUE; // Skip tool windows
+    if (exStyle & WS_EX_TOOLWINDOW) return TRUE;               // Skip tool windows
     LONG style = GetWindowLong(hwnd, GWL_STYLE);
     if ((style & WS_POPUP) || (style & WS_CHILD)) return TRUE; // Skip popups or child windows
 
@@ -291,15 +305,31 @@ void AddWindowBreadthFirst(HWND newWindow, float splitRatio) {
     }
 }
 
+// Function to determine the split type based on direction
+SplitType GetSplitTypeFromDirection(Direction dir) {
+    switch (dir) {
+        case Direction::LEFT:
+        case Direction::RIGHT:
+            return SplitType::VERTICAL;
+        case Direction::UP:
+        case Direction::DOWN:
+            return SplitType::HORIZONTAL;
+        default:
+            return SplitType::VERTICAL; // Default fallback
+    }
+}
+
 // Function to apply the layout by traversing the tree
 void ApplyLayout(LayoutNode* node, RECT area) {
     if (!node) return;
 
     if (!node->isSplit) {
         // This is a leaf node; move the window to the specified area
-        if (MoveWindowNormalized(node->windowInfo.hwnd, area.left, area.top,
-            area.right - area.left, area.bottom - area.top)) {
-            node->windowRect = area; // Store the window's position
+        if (node->windowInfo.hwnd != nullptr) {
+            if (MoveWindowNormalized(node->windowInfo.hwnd, area.left, area.top,
+                area.right - area.left, area.bottom - area.top)) {
+                node->windowRect = area; // Store the window's position
+            }
         }
         return;
     }
@@ -342,7 +372,7 @@ void SetWindowFullscreen(LayoutNode* node, const RECT& monitorRect) {
         // Save current window state
         windowInfo.savedStyle = GetWindowLong(node->windowInfo.hwnd, GWL_STYLE);
         if (!GetWindowRect(node->windowInfo.hwnd, &windowInfo.savedRect)) {
-            std::cerr << "SetWindowFullscreen: Failed to get window rect for HWND 0x" 
+            std::cerr << "SetWindowFullscreen: Failed to get window rect for HWND=0x" 
                       << std::hex << node->windowInfo.hwnd << std::dec 
                       << ". Error: " << GetLastError() << "\n";
             return;
@@ -406,6 +436,7 @@ void CollectLeafNodes(LayoutNode* node, std::vector<LayoutNode*>& leaves) {
 // Function to swap two window handles
 bool SwapWindowHandles(LayoutNode* nodeA, LayoutNode* nodeB) {
     if (!nodeA || !nodeB) return false;
+    if (nodeA->windowInfo.hwnd == nullptr || nodeB->windowInfo.hwnd == nullptr) return false;
 
     std::swap(nodeA->windowInfo.hwnd, nodeB->windowInfo.hwnd);
 
@@ -446,7 +477,7 @@ void FocusWindow(LayoutNode* node) {
 bool RegisterHotKeys() {
     bool success = true;
 
-    // Define a lambda to attempt hotkey registration and report failures
+    // Lambda that attempts hotkey registration and reports failures
     auto register_hotkey = [&](int id, UINT modifiers, UINT vk, const char* description) -> bool {
         if (!RegisterHotKey(nullptr, id, modifiers, vk)) {
             std::cerr << "RegisterHotKeys: Failed to register hotkey ID " << id 
@@ -477,14 +508,16 @@ bool RegisterHotKeys() {
     // Register resize mode toggle hotkey
     success &= register_hotkey(10, MOD_KEY, 'R', "Toggle Resize Mode");
 
-
+    // **Register Split Orientation Toggle Hotkeys**
+    success &= register_hotkey(16, MOD_KEY, 'V', "Toggle to Vertical Split");
+    success &= register_hotkey(17, MOD_KEY, 'H', "Toggle to Horizontal Split");
 
     return success;
 }
 
 // Function to unregister all hotkeys
 void UnregisterHotKeys() {
-    for (int id = 1; id <= 14; ++id) { // Assuming hotkey IDs range from 1 to 14
+    for (int id = 1; id <= 17; ++id) { // Updated to 17 to include new hotkeys
         UnregisterHotKey(nullptr, id);
     }
     std::cout << "UnregisterHotKeys: All hotkeys unregistered.\n";
@@ -575,67 +608,12 @@ void Navigate(Direction dir) {
         else {
             std::cout << "Navigate: No window in the " <<
                 (dir == Direction::LEFT ? "LEFT" :
-                dir == Direction::RIGHT ? "RIGHT" :
-                dir == Direction::UP ? "UP" : "DOWN") << " direction.\n";
+                 dir == Direction::RIGHT ? "RIGHT" :
+                 dir == Direction::UP ? "UP" : "DOWN") << " direction.\n";
         }
     }
     else {
         std::cerr << "Navigate: Current window not managed.\n";
-    }
-}
-
-// Function to move a window to a new direction by swapping window handles
-bool MoveWindowInDirection(Direction dir) {
-    HWND current = GetForegroundWindow();
-    LayoutNode* currentNode = FindLayoutNode(root.get(), current);
-    if (!currentNode) {
-        std::cerr << "MoveWindowInDirection: Current window not managed.\n";
-        return false;
-    }
-
-    // Debug: Print layout before moving
-    std::cout << "MoveWindowInDirection: Layout before moving:\n";
-    PrintLayout(root.get());
-
-    LayoutNode* adjacentNode = FindAdjacent(currentNode, dir);
-    if (!adjacentNode) {
-        std::cout << "MoveWindowInDirection: No window in the " <<
-            (dir == Direction::LEFT ? "LEFT" :
-            dir == Direction::RIGHT ? "RIGHT" :
-            dir == Direction::UP ? "UP" : "DOWN") << " direction to move.\n";
-        return false;
-    }
-
-    // Debug: Print adjacent window
-    std::cout << "MoveWindowInDirection: Adjacent window HWND=0x" 
-              << std::hex << adjacentNode->windowInfo.hwnd << std::dec << "\n";
-
-    // Swap the window handles
-    if (SwapWindowHandles(currentNode, adjacentNode)) {
-        std::cout << "MoveWindowInDirection: Swapped windows successfully.\n";
-        // Debug: Print layout after moving
-        std::cout << "MoveWindowInDirection: Layout after moving:\n";
-        PrintLayout(root.get());
-        return true;
-    }
-
-    return false;
-}
-
-// Debugging Function to Print the Layout Tree
-void PrintLayout(LayoutNode* node, int depth) {
-    if (!node) return;
-    for (int i = 0; i < depth; ++i) std::cout << "  ";
-    if (node->isSplit) {
-        std::cout << "Split: " << (node->splitType == SplitType::VERTICAL ? "Vertical" : "Horizontal") 
-                  << ", Ratio: " << node->splitRatio << "\n";
-        PrintLayout(node->firstChild.get(), depth + 1);
-        PrintLayout(node->secondChild.get(), depth + 1);
-    }
-    else {
-        std::string title = GetWindowTitle(node->windowInfo.hwnd);
-        std::cout << "Window: HWND=0x" << std::hex << node->windowInfo.hwnd << std::dec 
-                  << ", Title=\"" << title << "\"\n";
     }
 }
 
@@ -661,6 +639,137 @@ void AdjustSplitRatio(LayoutNode* node, float deltaRatio) {
     ReleaseDC(nullptr, hdcScreen);
 
     TileWindows(screenRect);
+}
+
+// Function to move a window in a given direction
+bool MoveWindowInDirection(Direction dir) {
+    std::lock_guard<std::mutex> lock(layoutMutex); // Ensure thread safety
+
+    HWND current = GetForegroundWindow();
+    LayoutNode* currentNode = FindLayoutNode(root.get(), current);
+    if (!currentNode) {
+        std::cerr << "MoveWindowInDirection: Current window not managed.\n";
+        return false;
+    }
+
+    // Debug: Print layout before moving
+    std::cout << "MoveWindowInDirection: Layout before moving:\n";
+    PrintLayout(root.get());
+
+    LayoutNode* adjacentNode = FindAdjacent(currentNode, dir);
+    if (!adjacentNode) {
+        std::cout << "MoveWindowInDirection: No window in the " <<
+            (dir == Direction::LEFT ? "LEFT" :
+             dir == Direction::RIGHT ? "RIGHT" :
+             dir == Direction::UP ? "UP" : "DOWN") << " direction to move.\n";
+
+        // **Prevent Split Creation Without Window Assignment**
+        // Check if there's a pending split available
+        if (!pendingSplits.empty()) {
+            std::cout << "MoveWindowInDirection: Pending splits exist. Waiting for window assignment.\n";
+            return false; // Do not create a new split
+        }
+
+        // Determine if split orientation needs to change
+        SplitType desiredSplit = GetSplitTypeFromDirection(dir);
+        if (currentNode->parent && currentNode->parent->splitType != desiredSplit) {
+            // Change split type of the parent
+            currentNode->parent->splitType = desiredSplit;
+            std::cout << "MoveWindowInDirection: Changed split type to " <<
+                (desiredSplit == SplitType::VERTICAL ? "VERTICAL" : "HORIZONTAL") << ".\n";
+
+            // Reapply layout to adjust window positions
+            HDC hdcScreen = GetDC(nullptr);
+            RECT screenRect;
+            screenRect.left = 0;
+            screenRect.top = 0;
+            screenRect.right = GetDeviceCaps(hdcScreen, HORZRES);
+            screenRect.bottom = GetDeviceCaps(hdcScreen, VERTRES);
+            ReleaseDC(nullptr, hdcScreen);
+
+            TileWindows(screenRect);
+            return true;
+        }
+
+        // If split orientation does not need to change, do not alter layout
+        std::cout << "MoveWindowInDirection: Split orientation does not need to change.\n";
+        return false; // Exit without altering the layout
+    }
+
+    // Debug: Print adjacent window
+    std::cout << "MoveWindowInDirection: Adjacent window HWND=0x" 
+              << std::hex << adjacentNode->windowInfo.hwnd << std::dec << "\n";
+
+    // Swap the window handles
+    if (SwapWindowHandles(currentNode, adjacentNode)) {
+        std::cout << "MoveWindowInDirection: Swapped windows successfully.\n";
+        // Debug: Print layout after moving
+        std::cout << "MoveWindowInDirection: Layout after moving:\n";
+        PrintLayout(root.get());
+        return true;
+    }
+
+    return false;
+}
+
+// Function to change the split orientation of the current container
+void ChangeSplitOrientation(SplitType newSplitType) {
+    std::lock_guard<std::mutex> lock(layoutMutex);
+
+    HWND current = GetForegroundWindow();
+    LayoutNode* currentNode = FindLayoutNode(root.get(), current);
+
+    if (!currentNode) {
+        std::cerr << "ChangeSplitOrientation: Current window not managed.\n";
+        return;
+    }
+
+    // Find the parent split node
+    LayoutNode* parent = currentNode->parent;
+    if (!parent) {
+        std::cerr << "ChangeSplitOrientation: Current window has no parent split node.\n";
+        return;
+    }
+
+    // Check if the parent split type is already the desired type
+    if (parent->splitType == newSplitType) {
+        std::cout << "ChangeSplitOrientation: Split type is already " 
+                  << (newSplitType == SplitType::VERTICAL ? "Vertical" : "Horizontal") << ".\n";
+        return;
+    }
+
+    // Change the split type
+    parent->splitType = newSplitType;
+    std::cout << "ChangeSplitOrientation: Split type changed to " 
+              << (newSplitType == SplitType::VERTICAL ? "Vertical" : "Horizontal") << ".\n";
+
+    // Re-apply the layout to reflect the change
+    HDC hdcScreen = GetDC(nullptr);
+    RECT screenRect;
+    screenRect.left = 0;
+    screenRect.top = 0;
+    screenRect.right = GetDeviceCaps(hdcScreen, HORZRES);
+    screenRect.bottom = GetDeviceCaps(hdcScreen, VERTRES);
+    ReleaseDC(nullptr, hdcScreen);
+
+    TileWindows(screenRect);
+}
+
+// Debugging Function to Print the Layout Tree
+void PrintLayout(LayoutNode* node, int depth) {
+    if (!node) return;
+    for (int i = 0; i < depth; ++i) std::cout << "  ";
+    if (node->isSplit) {
+        std::cout << "Split: " << (node->splitType == SplitType::VERTICAL ? "Vertical" : "Horizontal") 
+                  << ", Ratio: " << node->splitRatio << "\n";
+        PrintLayout(node->firstChild.get(), depth + 1);
+        PrintLayout(node->secondChild.get(), depth + 1);
+    }
+    else {
+        std::string title = GetWindowTitle(node->windowInfo.hwnd);
+        std::cout << "Window: HWND=0x" << std::hex << node->windowInfo.hwnd << std::dec 
+                  << ", Title=\"" << title << "\"\n";
+    }
 }
 
 // Low-level keyboard hook callback
@@ -783,15 +892,6 @@ void CALLBACK WinEventProc(
             return;
         }
 
-        // Check if the window is already managed
-        auto it = std::find_if(managedWindows.begin(), managedWindows.end(),
-            [hwnd](const WindowInfo& win) { return win.hwnd == hwnd; });
-
-        if (it != managedWindows.end()) {
-            std::cout << " - Skipped: Window is already managed. Title=\"" << title << "\"\n";
-            return;
-        }
-
         // Initialize WindowInfo
         WindowInfo winInfo;
         winInfo.hwnd = hwnd;
@@ -800,8 +900,25 @@ void CALLBACK WinEventProc(
         managedWindows.push_back(winInfo);
         std::cout << " - Added: New window managed. Title=\"" << title << "\"\n";
 
-        // Add the new window to the layout tree
-        AddWindowBreadthFirst(hwnd);
+        // Assign the new window to the first available pending split
+        bool assigned = false;
+        while (!pendingSplits.empty()) {
+            LayoutNode* pendingNode = pendingSplits.front();
+            pendingSplits.pop();
+
+            if (pendingNode && !pendingNode->isSplit && pendingNode->windowInfo.hwnd == nullptr) {
+                pendingNode->windowInfo.hwnd = hwnd;
+                std::cout << " - Assigned new window to pending split.\n";
+                assigned = true;
+                break;
+            }
+        }
+
+        if (!assigned) {
+            // If no pending split found, add breadth-first
+            std::cout << " - No pending split found. Adding breadth-first.\n";
+            AddWindowBreadthFirst(hwnd);
+        }
 
         // Re-apply the tiling layout
         HDC hdcScreen = GetDC(nullptr);
@@ -850,14 +967,16 @@ void CALLBACK WinEventProc(
                             parent->parent->secondChild = std::move(sibling);
                             parent->parent->secondChild->parent = parent->parent;
                         }
-                    } else {
+                    }
+                    else {
                         // If parent is root
                         root = std::move(sibling);
                         if (root) {
                             root->parent = nullptr;
                         }
                     }
-                } else {
+                }
+                else {
                     // If the node to remove is root
                     root.reset();
                 }
@@ -891,16 +1010,16 @@ void UnregisterWinEventHooks(HWINEVENTHOOK hHookShow, HWINEVENTHOOK hHookDestroy
     std::cout << "UnregisterWinEventHooks: All WinEvent hooks unregistered.\n";
 }
 
+// Function to close a focused window
 void CloseFocusedWindow(HWND currentWindow) {
     PostMessage(currentWindow, WM_CLOSE, 0, 0);
 }
 
 int main() {
-    // Correct usage of SetProcessDPIAware
+    // Ensure the program is DPI Aware using SetProcessDPIAware
     BOOL dpiResult = SetProcessDPIAware();
     if (!dpiResult) {
         std::cerr << "Failed to set DPI awareness. Error: " << GetLastError() << "\n";
-        // Handle error if necessary
     } else {
         std::cout << "DPI awareness set successfully.\n";
     }
@@ -948,13 +1067,16 @@ int main() {
     std::cout << "Main: Available Hotkeys:\n";
     std::cout << "  MOD + LEFT/RIGHT: Focus adjacent windows horizontally.\n";
     std::cout << "  MOD + UP/DOWN: Focus adjacent windows vertically.\n";
-    std::cout << "  MOD + SHIFT + UP/DOWN/LEFT/RIGHT: Move focused window in the specified direction.\n";
+    std::cout << "  MOD + SHIFT + LEFT/RIGHT/UP/DOWN: Move focused window in the specified direction.\n";
     std::cout << "  MOD + F: Toggle fullscreen on the active window.\n";
+    std::cout << "  MOD + V: Toggle to Vertical Split of the current container.\n";    // New Hotkey
+    std::cout << "  MOD + H: Toggle to Horizontal Split of the current container.\n";  // New Hotkey
     std::cout << "  MOD + R: Toggle resize mode.\n";
     std::cout << "    While in resize mode, use arrow keys to resize the focused window.\n";
     std::cout << "      Press SHIFT + Arrow Key to shrink the window.\n";
     std::cout << "      Press Arrow Key alone to grow the window.\n";
     std::cout << "    Press ESC or MOD + R to exit resize mode.\n";
+    std::cout << "  MOD + SHIFT + Q: Close the focused window.\n";
 
     // Register WinEvent hooks for window show and destruction
     HWINEVENTHOOK hEventHookShow = SetWinEventHook(
@@ -1099,6 +1221,16 @@ int main() {
                     CloseFocusedWindow(current);
                     break;
                 }
+                case 16: { // MOD + V (Toggle to Vertical Split)
+                    std::cout << "Hotkey 16: MOD + V pressed. Changing split to Vertical.\n";
+                    ChangeSplitOrientation(SplitType::VERTICAL);
+                    break;
+                }
+                case 17: { // MOD + H (Toggle to Horizontal Split)
+                    std::cout << "Hotkey 17: MOD + H pressed. Changing split to Horizontal.\n";
+                    ChangeSplitOrientation(SplitType::HORIZONTAL);
+                    break;
+                }
                 default:
                     std::cerr << "Main: Unknown hotkey ID received: " << msg.wParam << "\n";
                     break;
@@ -1118,7 +1250,7 @@ int main() {
     UnregisterHotKeys();
 
     // Unhook WinEvent hooks
-    UnregisterWinEventHooks(hEventHookShow, hEventHookDestroy, nullptr); // nullptr for the removed hook
+    UnregisterWinEventHooks(hEventHookShow, hEventHookDestroy, nullptr);
 
     std::cout << "Main: Application exiting.\n";
     return 0;
