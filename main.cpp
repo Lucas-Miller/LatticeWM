@@ -15,6 +15,8 @@
 // Define MOD key (can be changed to MOD_CONTROL, MOD_WIN, etc.)
 const UINT MOD_KEY = MOD_ALT;
 
+const unsigned int FOCUSED_OUTLINE_COLOR = 0xFF5733;
+
 // Enumeration for split orientation
 enum class SplitType {
     VERTICAL,   // Split into columns (left/right)
@@ -458,6 +460,51 @@ bool SwapWindowHandles(LayoutNode* nodeA, LayoutNode* nodeB) {
     return true;
 }
 
+#include <windows.h>
+
+#include <windows.h>
+
+void OutlineWindow(HWND hwnd, unsigned int hexColor, int thickness) {
+    // Get the dimensions of the window
+    RECT rect;
+    if (!GetWindowRect(hwnd, &rect)) {
+        return; // Failed to get the window rect
+    }
+
+    // Get the device context of the desktop (where the window is drawn)
+    HDC hdc = GetDC(nullptr);
+    if (!hdc) {
+        return; // Failed to get the device context
+    }
+
+    // Convert hexColor to COLORREF
+    COLORREF color = RGB((hexColor >> 16) & 0xFF, (hexColor >> 8) & 0xFF, hexColor & 0xFF);
+
+    // Create a solid brush with the desired color
+    HBRUSH brush = CreateSolidBrush(color);
+    if (!brush) {
+        ReleaseDC(nullptr, hdc);
+        return; // Failed to create the brush
+    }
+
+    // Draw the border
+    for (int i = 0; i < thickness; ++i) {
+        RECT borderRect = {
+            rect.left - i,
+            rect.top - i,
+            rect.right + i,
+            rect.bottom + i
+        };
+        FrameRect(hdc, &borderRect, brush);
+    }
+
+    // Clean up
+    DeleteObject(brush);
+    ReleaseDC(nullptr, hdc);
+}
+
+
+
 // Function to focus a window
 void FocusWindow(LayoutNode* node) {
     if (!node || node->windowInfo.hwnd == nullptr) return;
@@ -471,6 +518,7 @@ void FocusWindow(LayoutNode* node) {
     ShowWindow(hwnd, SW_RESTORE);
     SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
     SetForegroundWindow(hwnd);
+    OutlineWindow(hwnd, FOCUSED_OUTLINE_COLOR, 2);
 }
 
 // Function to register hotkeys
