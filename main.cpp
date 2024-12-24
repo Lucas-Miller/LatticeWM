@@ -173,40 +173,36 @@ bool MoveWindowNormalized(HWND hwnd, int x, int y, int width, int height) {
         return false;
     }
 
-    // Temporarily set to a normalized style
-    if (!SetWindowLong(hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE)) {
+    // Ensure window is restored (not minimized or maximized)
+    ShowWindow(hwnd, SW_RESTORE);
+
+    // Remove WS_CAPTION and WS_THICKFRAME to make the window borderless
+    LONG newStyle = originalStyle & ~(WS_CAPTION | WS_THICKFRAME);
+    if (!SetWindowLong(hwnd, GWL_STYLE, newStyle)) {
         std::cerr << "MoveWindowNormalized: Failed to set window style for HWND=0x" 
                   << std::hex << hwnd << std::dec << ". Error: " << GetLastError() << "\n";
         return false;
     }
 
-    if (!SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER)) {
+    // Apply the style change
+    if (!SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, 
+        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER)) {
         std::cerr << "MoveWindowNormalized: Failed to update window style for HWND=0x" 
                   << std::hex << hwnd << std::dec << ". Error: " << GetLastError() << "\n";
         return false;
     }
 
-    // Move the window
-    BOOL success = SetWindowPos(hwnd, HWND_TOP, x, y, width, height, SWP_NOZORDER | SWP_SHOWWINDOW);
+    // Move the window to the specified position and size
+    BOOL success = SetWindowPos(hwnd, HWND_TOP, x, y, width, height, 
+        SWP_NOZORDER | SWP_SHOWWINDOW);
     if (!success) {
         std::cerr << "MoveWindowNormalized: Failed to move HWND=0x" 
                   << std::hex << hwnd << std::dec << ". Error: " << GetLastError() << "\n";
     }
 
-    // Restore original style
-    if (!SetWindowLong(hwnd, GWL_STYLE, originalStyle)) {
-        std::cerr << "MoveWindowNormalized: Failed to restore window style for HWND=0x" 
-                  << std::hex << hwnd << std::dec << ". Error: " << GetLastError() << "\n";
-        return false;
-    }
-    if (!SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER)) {
-        std::cerr << "MoveWindowNormalized: Failed to restore window style for HWND=0x" 
-                  << std::hex << hwnd << std::dec << ". Error: " << GetLastError() << "\n";
-        return false;
-    }
-
     return success != FALSE;
 }
+
 
 // Callback to collect visible windows that will be managed
 BOOL CALLBACK EnumWindowsCallback(HWND hwnd, LPARAM lParam) {
@@ -459,10 +455,6 @@ bool SwapWindowHandles(LayoutNode* nodeA, LayoutNode* nodeB) {
 
     return true;
 }
-
-#include <windows.h>
-
-#include <windows.h>
 
 void OutlineWindow(HWND hwnd, unsigned int hexColor, int thickness) {
     // Get the dimensions of the window
