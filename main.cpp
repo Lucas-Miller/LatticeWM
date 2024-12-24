@@ -7,15 +7,16 @@
 #include <queue>
 #include <mutex>
 #include <string>
-#include <thread>
-#include <chrono>
 #include <shellscalingapi.h>
 #pragma comment(lib, "Shcore.lib")
 
 // Define MOD key (can be changed to MOD_CONTROL, MOD_WIN, etc.)
 const UINT MOD_KEY = MOD_ALT;
 
+// Define the color of the outline of the current focused window
 const unsigned int FOCUSED_OUTLINE_COLOR = 0xFF5733;
+
+const int OUTLINE_THICKNESS = 1;
 
 // Enumeration for split orientation
 enum class SplitType {
@@ -510,7 +511,7 @@ void FocusWindow(LayoutNode* node) {
     ShowWindow(hwnd, SW_RESTORE);
     SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
     SetForegroundWindow(hwnd);
-    OutlineWindow(hwnd, FOCUSED_OUTLINE_COLOR, 2);
+    OutlineWindow(hwnd, FOCUSED_OUTLINE_COLOR, OUTLINE_THICKNESS);
 }
 
 // Function to register hotkeys
@@ -665,9 +666,9 @@ void AdjustSplitRatio(LayoutNode* node, float deltaRatio) {
     node->splitRatio += deltaRatio;
 
     // Clamp the split ratio to avoid extreme sizes
-    node->splitRatio = std::max(0.2f, std::min(0.8f, node->splitRatio));
-
-    std::cout << "AdjustSplitRatio: Adjusted split ratio to " << node->splitRatio << "\n";
+    // NOTE: minwindef.h which is included indirectly, defines a min and max method. I've wrapped
+    // std::min and std::max here with parenthesis to fully qualify their names and prevent warnings
+    node->splitRatio = (std::max)(0.2f, (std::min)(0.8f, node->splitRatio));
 
     // Re-apply the layout
     HDC hdcScreen = GetDC(nullptr);
