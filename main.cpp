@@ -18,6 +18,17 @@ const unsigned int FOCUSED_OUTLINE_COLOR = 0xFF5733;
 
 const int OUTLINE_THICKNESS = 1;
 
+
+// Global variables for the overlay window
+HWND g_hOverlay = NULL;
+COLORREF g_BorderColor = RGB(0, 255, 0);
+int g_BorderThickness = 5;
+
+// Forward declarations
+LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+
+
 // Enumeration for split orientation
 enum class SplitType {
     VERTICAL,   // Split into columns (left/right)
@@ -498,7 +509,105 @@ void OutlineWindow(HWND hwnd, unsigned int hexColor, int thickness) {
 
 
 
-// Function to focus a window
+void CreateOverlayWindow(HWND targetHwnd) {
+    if (g_hOverlay != NULL) return; // Overlay already exists
+
+    // Register window class
+    const char CLASS_NAME[] = "OverlayWindowClass"; // Use narrow string
+
+    WNDCLASSA wc = { }; // Use WNDCLASSA for ANSI
+    wc.lpfnWndProc   = OverlayWndProc;
+    wc.hInstance     = GetModuleHandle(NULL);
+    wc.lpszClassName = CLASS_NAME;
+    wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
+
+    if (!RegisterClassA(&wc)) { // Use RegisterClassA
+        std::cerr << "Failed to register window class.\n";
+        return;
+    }
+
+    // Get target window position and size
+    RECT rect;
+    GetWindowRect(targetHwnd, &rect);
+
+    // Create the overlay window
+    g_hOverlay = CreateWindowExA( // Use CreateWindowExA
+        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST,
+        CLASS_NAME,
+        NULL,
+        WS_POPUP,
+        rect.left, rect.top,
+        rect.right - rect.left, rect.bottom - rect.top,
+        NULL,
+        NULL,
+        GetModuleHandle(NULL),
+        NULL
+    );
+
+    if (!g_hOverlay) {
+        std::cerr << "Failed to create overlay window.\n";
+        return;
+    }
+
+    // Make the window transparent
+    // Make pure blue (RGB 0, 0, 255) transparent
+SetLayeredWindowAttributes(g_hOverlay, RGB(255, 255, 255), 0, LWA_COLORKEY);
+
+
+    ShowWindow(g_hOverlay, SW_SHOW);
+}
+
+void UpdateOverlayWindow(HWND targetHwnd) {
+    if (g_hOverlay == NULL) return;
+
+    // Get target window position and size
+    RECT rect;
+    GetWindowRect(targetHwnd, &rect);
+
+    // Move and resize the overlay window to match the target window
+    SetWindowPos(g_hOverlay, HWND_TOPMOST, rect.left, rect.top, 
+                 rect.right - rect.left, rect.bottom - rect.top, SWP_NOACTIVATE);
+}
+
+void DestroyOverlayWindow() {
+    if (g_hOverlay != NULL) {
+        DestroyWindow(g_hOverlay);
+        g_hOverlay = NULL;
+    }
+}
+
+LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+
+        // Create a pen for the border
+        HPEN hPen = CreatePen(PS_SOLID, g_BorderThickness, g_BorderColor);
+        HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
+
+        // Get client area
+        RECT rect;
+        GetClientRect(hwnd, &rect);
+
+        // Draw the border
+        for (int i = 0; i < g_BorderThickness; ++i) {
+            Rectangle(hdc, rect.left + i, rect.top + i, rect.right - i, rect.bottom - i);
+        }
+
+        // Cleanup
+        SelectObject(hdc, hOldPen);
+        DeleteObject(hPen);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
 void FocusWindow(LayoutNode* node) {
     if (!node || node->windowInfo.hwnd == nullptr) return;
 
@@ -506,12 +615,19 @@ void FocusWindow(LayoutNode* node) {
 
     std::string title = GetWindowTitle(hwnd);
     std::cout << "FocusWindow: Focusing window: " << title << " (HWND=0x" 
-              << std::hex << hwnd << std::dec << ")\n";
+              << std::hex << reinterpret_cast<uintptr_t>(hwnd) << std::dec << ")\n";
 
     ShowWindow(hwnd, SW_RESTORE);
-    SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, 
+                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
     SetForegroundWindow(hwnd);
-    OutlineWindow(hwnd, FOCUSED_OUTLINE_COLOR, OUTLINE_THICKNESS);
+
+    // Create and update the overlay window
+    CreateOverlayWindow(hwnd);
+    UpdateOverlayWindow(hwnd);
+
+    // Optionally, handle window move/resize events to update the overlay
+    // This requires additional implementation, such as setting up a hook or a timer
 }
 
 // Function to register hotkeys
