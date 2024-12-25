@@ -372,6 +372,21 @@ void TileWindows(const RECT& screenRect) {
     }
 }
 
+// Toggle Overlay Function
+void ToggleOverlayWindow(HWND overlayHwnd) {
+    if (overlayHwnd && IsWindow(overlayHwnd)) {
+        if (IsWindowVisible(overlayHwnd)) {
+            ShowWindow(overlayHwnd, SW_HIDE);
+            std::cout << "Overlay window hidden.\n";
+        } else {
+            ShowWindow(overlayHwnd, SW_SHOW);
+            std::cout << "Overlay window shown.\n";
+        }
+    } else {
+        std::cerr << "Invalid overlay window handle.\n";
+    }
+}
+
 // Function to toggle fullscreen for a window
 void SetWindowFullscreen(LayoutNode* node, const RECT& monitorRect) {
     if (!node || node->windowInfo.hwnd == nullptr) return;
@@ -379,6 +394,7 @@ void SetWindowFullscreen(LayoutNode* node, const RECT& monitorRect) {
     WindowInfo& windowInfo = node->windowInfo;
 
     if (!windowInfo.isFullscreen) {
+        ToggleOverlayWindow(g_hOverlay);
         // Save current window state
         windowInfo.savedStyle = GetWindowLong(node->windowInfo.hwnd, GWL_STYLE);
         if (!GetWindowRect(node->windowInfo.hwnd, &windowInfo.savedRect)) {
@@ -399,6 +415,7 @@ void SetWindowFullscreen(LayoutNode* node, const RECT& monitorRect) {
             monitorRect.bottom - monitorRect.top);
     }
     else {
+        ToggleOverlayWindow(g_hOverlay);
         // Restore original window style
         SetWindowLong(node->windowInfo.hwnd, GWL_STYLE, windowInfo.savedStyle);
         SetWindowPos(node->windowInfo.hwnd, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER);
@@ -441,6 +458,22 @@ void CollectLeafNodes(LayoutNode* node, std::vector<LayoutNode*>& leaves) {
         CollectLeafNodes(node->firstChild.get(), leaves);
         CollectLeafNodes(node->secondChild.get(), leaves);
     }
+}
+
+// Function to check if any window is in fullscreen mode
+bool IsAnyWindowFullscreen() {
+    if (!root) return false; // No layout initialized
+
+    std::vector<LayoutNode*> leaves;
+    CollectLeafNodes(root.get(), leaves); // Collect all leaf nodes (windows)
+
+    for (const auto& node : leaves) {
+        if (node->windowInfo.isFullscreen) {
+            return true; // At least one window is in fullscreen
+        }
+    }
+
+    return false; // No windows are in fullscreen
 }
 
 // Function to swap two window handles
@@ -1266,18 +1299,9 @@ int main() {
     MSG msg = { 0 };
     while (GetMessage(&msg, nullptr, 0, 0)) {
         if (msg.message == WM_HOTKEY) {
-            switch (msg.wParam) {
-                case 1: { // MOD + LEFT
-                    std::cout << "Hotkey 1: MOD + LEFT pressed. Focusing left window.\n";
-                    Navigate(Direction::LEFT);
-                    break;
-                }
-                case 2: { // MOD + RIGHT
-                    std::cout << "Hotkey 2: MOD + RIGHT pressed. Focusing right window.\n";
-                    Navigate(Direction::RIGHT);
-                    break;
-                }
-                case 3: { // MOD + F (Toggle Fullscreen)
+            // Check if any window is in fullscreen mode
+            if (IsAnyWindowFullscreen()) {
+                if (msg.wParam == 3) { // Hotkey ID 3 corresponds to MOD + F
                     std::cout << "Hotkey 3: MOD + F pressed. Toggling fullscreen.\n";
                     HWND current = GetForegroundWindow();
                     LayoutNode* currentNode = FindLayoutNode(root.get(), current);
@@ -1296,101 +1320,140 @@ int main() {
                     else {
                         std::cerr << "Hotkey 3: Current window not managed.\n";
                     }
-                    break;
                 }
-                case 6: { // MOD + UP
-                    std::cout << "Hotkey 6: MOD + UP pressed. Focusing up window.\n";
-                    Navigate(Direction::UP);
-                    break;
+                else {
+                    // All other hotkeys are ignored while in fullscreen
+                    std::cout << "Hotkeys are disabled while a window is fullscreen. Only MOD + F is active.\n";
                 }
-                case 7: { // MOD + DOWN
-                    std::cout << "Hotkey 7: MOD + DOWN pressed. Focusing down window.\n";
-                    Navigate(Direction::DOWN);
-                    break;
-                }
-                case 10: { // MOD + R (Toggle Resize Mode)
-                    std::cout << "Hotkey 10: MOD + R pressed. Toggling resize mode.\n";
-                    isResizeMode = !isResizeMode;
-                    if (isResizeMode) {
-                        // Get the currently focused window
+            }
+            else {
+                // No window is in fullscreen; process hotkeys normally
+                switch (msg.wParam) {
+                    case 1: { // MOD + LEFT
+                        std::cout << "Hotkey 1: MOD + LEFT pressed. Focusing left window.\n";
+                        Navigate(Direction::LEFT);
+                        break;
+                    }
+                    case 2: { // MOD + RIGHT
+                        std::cout << "Hotkey 2: MOD + RIGHT pressed. Focusing right window.\n";
+                        Navigate(Direction::RIGHT);
+                        break;
+                    }
+                    case 3: { // MOD + F (Toggle Fullscreen)
+                        std::cout << "Hotkey 3: MOD + F pressed. Toggling fullscreen.\n";
                         HWND current = GetForegroundWindow();
-                        activeNodeForResize = FindLayoutNode(root.get(), current);
-                        if (!activeNodeForResize) {
-                            std::cerr << "Hotkey 10: Current window not managed.\n";
-                            isResizeMode = false;
-                            break;
-                        }
+                        LayoutNode* currentNode = FindLayoutNode(root.get(), current);
+                        if (currentNode && currentNode->windowInfo.hwnd != nullptr) {
+                            // Get monitor information for fullscreen
+                            HMONITOR hMonitor = MonitorFromWindow(currentNode->windowInfo.hwnd, MONITOR_DEFAULTTONEAREST);
+                            MONITORINFO monitorInfo = { sizeof(monitorInfo) };
+                            if (!GetMonitorInfo(hMonitor, &monitorInfo)) {
+                                std::cerr << "Hotkey 3: Failed to get monitor info. Error: " << GetLastError() << "\n";
+                                break;
+                            }
 
-                        // Install the keyboard hook
-                        hKeyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc, nullptr, 0);
-                        if (!hKeyboardHook) {
-                            std::cerr << "Hotkey 10: Failed to install keyboard hook. Error: " << GetLastError() << "\n";
-                            isResizeMode = false;
-                            break;
+                            // Toggle fullscreen
+                            SetWindowFullscreen(currentNode, monitorInfo.rcMonitor);
                         }
+                        else {
+                            std::cerr << "Hotkey 3: Current window not managed.\n";
+                        }
+                        break;
+                    }
+                    case 6: { // MOD + UP
+                        std::cout << "Hotkey 6: MOD + UP pressed. Focusing up window.\n";
+                        Navigate(Direction::UP);
+                        break;
+                    }
+                    case 7: { // MOD + DOWN
+                        std::cout << "Hotkey 7: MOD + DOWN pressed. Focusing down window.\n";
+                        Navigate(Direction::DOWN);
+                        break;
+                    }
+                    case 10: { // MOD + R (Toggle Resize Mode)
+                        std::cout << "Hotkey 10: MOD + R pressed. Toggling resize mode.\n";
+                        isResizeMode = !isResizeMode;
+                        if (isResizeMode) {
+                            // Get the currently focused window
+                            HWND current = GetForegroundWindow();
+                            activeNodeForResize = FindLayoutNode(root.get(), current);
+                            if (!activeNodeForResize) {
+                                std::cerr << "Hotkey 10: Current window not managed.\n";
+                                isResizeMode = false;
+                                break;
+                            }
 
-                        std::cout << "Hotkey 10: Entered resize mode. Use arrow keys to resize.\n";
-                        std::cout << "  Press SHIFT + Arrow Key to shrink the window.\n";
-                        std::cout << "  Press Arrow Key alone to grow the window.\n";
-                        std::cout << "  Press ESC or MOD + R to exit resize mode.\n";
-                    }
-                    else {
-                        // Uninstall the keyboard hook
-                        if (hKeyboardHook) {
-                            UnhookWindowsHookEx(hKeyboardHook);
-                            hKeyboardHook = NULL;
+                            // Install the keyboard hook
+                            hKeyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc, nullptr, 0);
+                            if (!hKeyboardHook) {
+                                std::cerr << "Hotkey 10: Failed to install keyboard hook. Error: " << GetLastError() << "\n";
+                                isResizeMode = false;
+                                break;
+                            }
+
+                            std::cout << "Hotkey 10: Entered resize mode. Use arrow keys to resize.\n";
+                            std::cout << "  Press SHIFT + Arrow Key to shrink the window.\n";
+                            std::cout << "  Press Arrow Key alone to grow the window.\n";
+                            std::cout << "  Press ESC or MOD + R to exit resize mode.\n";
                         }
-                        std::cout << "Hotkey 10: Exited resize mode.\n";
+                        else {
+                            // Uninstall the keyboard hook
+                            if (hKeyboardHook) {
+                                UnhookWindowsHookEx(hKeyboardHook);
+                                hKeyboardHook = NULL;
+                            }
+                            std::cout << "Hotkey 10: Exited resize mode.\n";
+                        }
+                        break;
                     }
-                    break;
-                }
-                case 11: { // MOD + SHIFT + UP (Move Up)
-                    std::cout << "Hotkey 11: MOD + SHIFT + UP pressed. Moving window up.\n";
-                    if (MoveWindowInDirection(Direction::UP)) {
-                        std::cout << "Hotkey 11: Moved window up successfully.\n";
+                    case 11: { // MOD + SHIFT + UP (Move Up)
+                        std::cout << "Hotkey 11: MOD + SHIFT + UP pressed. Moving window up.\n";
+                        if (MoveWindowInDirection(Direction::UP)) {
+                            std::cout << "Hotkey 11: Moved window up successfully.\n";
+                        }
+                        break;
                     }
-                    break;
-                }
-                case 12: { // MOD + SHIFT + DOWN (Move Down)
-                    std::cout << "Hotkey 12: MOD + SHIFT + DOWN pressed. Moving window down.\n";
-                    if (MoveWindowInDirection(Direction::DOWN)) {
-                        std::cout << "Hotkey 12: Moved window down successfully.\n";
+                    case 12: { // MOD + SHIFT + DOWN (Move Down)
+                        std::cout << "Hotkey 12: MOD + SHIFT + DOWN pressed. Moving window down.\n";
+                        if (MoveWindowInDirection(Direction::DOWN)) {
+                            std::cout << "Hotkey 12: Moved window down successfully.\n";
+                        }
+                        break;
                     }
-                    break;
-                }
-                case 13: { // MOD + SHIFT + LEFT (Move Left)
-                    std::cout << "Hotkey 13: MOD + SHIFT + LEFT pressed. Moving window left.\n";
-                    if (MoveWindowInDirection(Direction::LEFT)) {
-                        std::cout << "Hotkey 13: Moved window left successfully.\n";
+                    case 13: { // MOD + SHIFT + LEFT (Move Left)
+                        std::cout << "Hotkey 13: MOD + SHIFT + LEFT pressed. Moving window left.\n";
+                        if (MoveWindowInDirection(Direction::LEFT)) {
+                            std::cout << "Hotkey 13: Moved window left successfully.\n";
+                        }
+                        break;
                     }
-                    break;
-                }
-                case 14: { // MOD + SHIFT + RIGHT (Move Right)
-                    std::cout << "Hotkey 14: MOD + SHIFT + RIGHT pressed. Moving window right.\n";
-                    if (MoveWindowInDirection(Direction::RIGHT)) {
-                        std::cout << "Hotkey 14: Moved window right successfully.\n";
+                    case 14: { // MOD + SHIFT + RIGHT (Move Right)
+                        std::cout << "Hotkey 14: MOD + SHIFT + RIGHT pressed. Moving window right.\n";
+                        if (MoveWindowInDirection(Direction::RIGHT)) {
+                            std::cout << "Hotkey 14: Moved window right successfully.\n";
+                        }
+                        break;
                     }
-                    break;
+                    case 15: { // MOD + SHIFT + Q (Close Focused Window)
+                        std::cout << "Hotkey 15: MOD + SHIFT + Q pressed. Closing Focused Window.\n";
+                        HWND current = GetForegroundWindow();
+                        CloseFocusedWindow(current);
+                        break;
+                    }
+                    case 16: { // MOD + V (Toggle to Vertical Split)
+                        std::cout << "Hotkey 16: MOD + V pressed. Changing split to Vertical.\n";
+                        ChangeSplitOrientation(SplitType::VERTICAL);
+                        break;
+                    }
+                    case 17: { // MOD + H (Toggle to Horizontal Split)
+                        std::cout << "Hotkey 17: MOD + H pressed. Changing split to Horizontal.\n";
+                        ChangeSplitOrientation(SplitType::HORIZONTAL);
+                        break;
+                    }
+                    default:
+                        std::cerr << "Main: Unknown hotkey ID received: " << msg.wParam << "\n";
+                        break;
                 }
-                case 15: { // MOD + SHIFT + Q (Close Focused Window)
-                    std::cout << "Hotkey 15: MOD + SHIFT + Q pressed. Closing Focused Window.\n";
-                    HWND current = GetForegroundWindow();
-                    CloseFocusedWindow(current);
-                    break;
-                }
-                case 16: { // MOD + V (Toggle to Vertical Split)
-                    std::cout << "Hotkey 16: MOD + V pressed. Changing split to Vertical.\n";
-                    ChangeSplitOrientation(SplitType::VERTICAL);
-                    break;
-                }
-                case 17: { // MOD + H (Toggle to Horizontal Split)
-                    std::cout << "Hotkey 17: MOD + H pressed. Changing split to Horizontal.\n";
-                    ChangeSplitOrientation(SplitType::HORIZONTAL);
-                    break;
-                }
-                default:
-                    std::cerr << "Main: Unknown hotkey ID received: " << msg.wParam << "\n";
-                    break;
             }
         }
         TranslateMessage(&msg);
