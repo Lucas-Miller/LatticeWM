@@ -8,6 +8,7 @@
 #include <mutex>
 #include <string>
 #include <shellscalingapi.h>
+#include <winuser.h>
 #pragma comment(lib, "Shcore.lib")
 
 // Define MOD key (can be changed to MOD_CONTROL, MOD_WIN, etc.)
@@ -501,47 +502,6 @@ bool SwapWindowHandles(LayoutNode* nodeA, LayoutNode* nodeB) {
     return true;
 }
 
-void OutlineWindow(HWND hwnd, unsigned int hexColor, int thickness) {
-    // Get the dimensions of the window
-    RECT rect;
-    if (!GetWindowRect(hwnd, &rect)) {
-        return; // Failed to get the window rect
-    }
-
-    // Get the device context of the desktop (where the window is drawn)
-    HDC hdc = GetDC(nullptr);
-    if (!hdc) {
-        return; // Failed to get the device context
-    }
-
-    // Convert hexColor to COLORREF
-    COLORREF color = RGB((hexColor >> 16) & 0xFF, (hexColor >> 8) & 0xFF, hexColor & 0xFF);
-
-    // Create a solid brush with the desired color
-    HBRUSH brush = CreateSolidBrush(color);
-    if (!brush) {
-        ReleaseDC(nullptr, hdc);
-        return; // Failed to create the brush
-    }
-
-    // Draw the border
-    for (int i = 0; i < thickness; ++i) {
-        RECT borderRect = {
-            rect.left - i,
-            rect.top - i,
-            rect.right + i,
-            rect.bottom + i
-        };
-        FrameRect(hdc, &borderRect, brush);
-    }
-
-    // Clean up
-    DeleteObject(brush);
-    ReleaseDC(nullptr, hdc);
-}
-
-
-
 void CreateOverlayWindow(HWND targetHwnd) {
     if (g_hOverlay != NULL) return; // Overlay already exists
 
@@ -702,12 +662,15 @@ bool RegisterHotKeys() {
     success &= register_hotkey(16, MOD_KEY, 'V', "Toggle to Vertical Split");
     success &= register_hotkey(17, MOD_KEY, 'H', "Toggle to Horizontal Split");
 
+    // **Register hotkey to open new terminal
+    success &= register_hotkey(18, MOD_KEY, VK_RETURN, "Open New Terminal Window");
+
     return success;
 }
 
 // Function to unregister all hotkeys
 void UnregisterHotKeys() {
-    for (int id = 1; id <= 17; ++id) { // Updated to 17 to include new hotkeys
+    for (int id = 1; id <= 18; ++id) {
         UnregisterHotKey(nullptr, id);
     }
     std::cout << "UnregisterHotKeys: All hotkeys unregistered.\n";
@@ -1205,6 +1168,77 @@ void CloseFocusedWindow(HWND currentWindow) {
     PostMessage(currentWindow, WM_CLOSE, 0, 0);
 }
 
+// Function to open the terminal
+void OpenTerminal() {
+    // Eventually we'll modify this function to allow users to specify their terminal from a config
+    // but this will be added at a later date
+    // - cmd.exe
+    // - powershell.exe
+    // - wt.exe (Windows Terminal, if installed)
+    // - bash.exe (Git Bash, if installed and in PATH)
+
+    // Example 1: Open Command Prompt
+    /*
+    ShellExecuteA(
+        NULL,                   // No parent window
+        "open",                 // Operation to perform
+        "cmd.exe",              // Application to start
+        NULL,                   // Command line arguments
+        NULL,                   // Default directory
+        SW_SHOWDEFAULT          // Show command
+    );
+    */
+
+    // Example 2: Open PowerShell
+    /*
+    ShellExecuteA(
+        NULL,
+        "open",
+        "powershell.exe",
+        NULL,
+        NULL,
+        SW_SHOWDEFAULT
+    );
+    */
+
+    // Example 3: Open Windows Terminal (requires Windows Terminal to be installed)
+    /*
+    ShellExecuteA(
+        NULL,
+        "open",
+        "wt.exe",
+        NULL,
+        NULL,
+        SW_SHOWDEFAULT
+    );
+    */
+
+    // Example 4: Open Git Bash (ensure it's installed and added to PATH)
+    /*
+    ShellExecuteA(
+        NULL,
+        "open",
+        "bash.exe",
+        NULL,
+        NULL,
+        SW_SHOWDEFAULT
+    );
+    */
+
+    if (ShellExecuteA(
+        NULL,
+        "open",
+        "bash.exe",
+        NULL,
+        NULL,
+        SW_SHOWDEFAULT
+    ) <= (HINSTANCE)32) { // Error checking
+        std::cerr << "OpenTerminal: Failed to open Terminal. Error code: " << GetLastError() << "\n";
+    } else {
+        std::cout << "OpenTerminal: Terminal opened successfully.\n";
+    }
+}
+
 int main() {
     // Ensure the program is DPI Aware using SetProcessDPIAware
     BOOL dpiResult = SetProcessDPIAware();
@@ -1448,6 +1482,11 @@ int main() {
                     case 17: { // MOD + H (Toggle to Horizontal Split)
                         std::cout << "Hotkey 17: MOD + H pressed. Changing split to Horizontal.\n";
                         ChangeSplitOrientation(SplitType::HORIZONTAL);
+                        break;
+                    }
+                    case 18: { // MOD + Return (Open New Terminal Window)
+                        std::cout << "Hotkey 18: MOD + Return pressed. Opening new terminal window.\n";
+                        OpenTerminal();
                         break;
                     }
                     default:
